@@ -14,7 +14,30 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      stores: {
+        Row: {
+          api_access_token: string
+          created_at: string
+          id: number
+          shopify_domain: string
+          store_name: string
+        }
+        Insert: {
+          api_access_token: string
+          created_at?: string
+          id?: number
+          shopify_domain: string
+          store_name: string
+        }
+        Update: {
+          api_access_token?: string
+          created_at?: string
+          id?: number
+          shopify_domain?: string
+          store_name?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
