@@ -1,12 +1,17 @@
-import { serve } from "https://deno.land/std@0.208.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+};
+
+// Define the structure of the incoming request body for type safety.
+interface RequestBody {
+  store_id: number;
+  data_type: 'orders' | 'products' | 'customers';
 }
 
-// GraphQL queries for different data types
+// GraphQL queries - removed restricted customer fields to avoid access issues
 const QUERIES = {
   orders: `
     query getOrders {
@@ -18,17 +23,7 @@ const QUERIES = {
             processedAt
             displayFinancialStatus
             displayFulfillmentStatus
-            totalPriceSet {
-              shopMoney {
-                amount
-                currencyCode
-              }
-            }
-            customer {
-              firstName
-              lastName
-              email
-            }
+            totalPriceSet { shopMoney { amount currencyCode } }
           }
         }
       }
@@ -45,15 +40,8 @@ const QUERIES = {
             status
             totalInventory
             updatedAt
-            featuredImage {
-              url
-            }
-            priceRangeV2 {
-              minVariantPrice {
-                amount
-                currencyCode
-              }
-            }
+            featuredImage { url }
+            priceRangeV2 { minVariantPrice { amount currencyCode } }
           }
         }
       }
@@ -65,146 +53,101 @@ const QUERIES = {
         edges {
           node {
             id
-            displayName
-            email
             numberOfOrders
-            amountSpent {
-              amount
-              currencyCode
-            }
+            amountSpent { amount currencyCode }
           }
         }
       }
     }
-  `
+  `,
 };
 
-serve(async (req) => {
-  // Handle CORS preflight requests
+Deno.serve(async (req) => {
+  // Immediately handle OPTIONS requests for CORS preflight.
   if (req.method === 'OPTIONS') {
-    return new Response(null, { headers: corsHeaders });
+    return new Response('ok', { headers: corsHeaders });
   }
 
   try {
-    const { store_id, data_type } = await req.json();
-
+    // 1. --- Validate and Parse Incoming Request ---
+    const { store_id, data_type }: RequestBody = await req.json();
     if (!store_id || !data_type) {
-      console.error('Missing required parameters:', { store_id, data_type });
-      return new Response(
-        JSON.stringify({ error: 'Missing store_id or data_type' }),
-        { 
-          status: 400, 
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-        }
-      );
+      throw new Error('Missing required fields: store_id and data_type.');
+    }
+    if (!QUERIES[data_type]) {
+      throw new Error(`Invalid data_type specified: ${data_type}`);
     }
 
-    if (!QUERIES[data_type as keyof typeof QUERIES]) {
-      console.error('Invalid data_type:', data_type);
-      return new Response(
-        JSON.stringify({ error: 'Invalid data_type. Must be: orders, products, or customers' }),
-        { 
-          status: 400, 
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-        }
-      );
-    }
+    // 2. --- Initialize Supabase Admin Client ---
+    // Use the admin client for server-side operations to bypass RLS.
+    const supabaseAdmin = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+    );
 
-    // Initialize Supabase client
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
-    const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-    
-    const supabase = createClient(supabaseUrl, supabaseKey);
-
-    // Get store details from database
-    const { data: store, error: storeError } = await supabase
+    // 3. --- Fetch Store Credentials from Database ---
+    console.log(`Fetching store details for ID: ${store_id}`);
+    const { data: store, error: storeError } = await supabaseAdmin
       .from('stores')
       .select('shopify_domain, api_access_token')
       .eq('id', store_id)
-      .single();
+      .single(); // .single() is important, it returns one object or null
 
     if (storeError || !store) {
-      console.error('Store not found:', storeError);
+      console.error('Error fetching store from DB:', storeError);
       return new Response(
-        JSON.stringify({ error: 'Store not found' }),
-        { 
-          status: 404, 
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-        }
+        JSON.stringify({ error: `Store with ID ${store_id} not found.` }),
+        { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    // Construct Shopify GraphQL endpoint
-    const shopifyUrl = `https://${store.shopify_domain}/admin/api/2024-07/graphql.json`;
-    
-    console.log('Fetching data from Shopify:', { shopifyUrl, data_type });
+    const { shopify_domain, api_access_token } = store;
 
-    // Make GraphQL request to Shopify
-    const shopifyResponse = await fetch(shopifyUrl, {
+    // 4. --- Make Request to Shopify GraphQL API ---
+    const shopifyApiUrl = `https://${shopify_domain}/admin/api/2024-07/graphql.json`;
+    const query = QUERIES[data_type];
+
+    console.log(`Making request to Shopify for ${data_type}...`);
+    const shopifyResponse = await fetch(shopifyApiUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Shopify-Access-Token': store.api_access_token,
+        'X-Shopify-Access-Token': api_access_token,
       },
-      body: JSON.stringify({
-        query: QUERIES[data_type as keyof typeof QUERIES],
-      }),
+      body: JSON.stringify({ query }),
     });
 
+    // 5. --- Handle Shopify's Response ---
     if (!shopifyResponse.ok) {
-      console.error('Shopify API error:', shopifyResponse.status, shopifyResponse.statusText);
-      const errorText = await shopifyResponse.text();
-      console.error('Error details:', errorText);
-      
-      return new Response(
-        JSON.stringify({ 
-          error: 'Shopify API request failed',
-          details: `${shopifyResponse.status}: ${shopifyResponse.statusText}`,
-          shopifyError: errorText
-        }),
-        { 
-          status: shopifyResponse.status, 
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-        }
-      );
+      // If Shopify returns an error, log it and forward it to the client.
+      const errorBody = await shopifyResponse.text();
+      console.error(`Shopify API error for ${shopify_domain}:`, {
+        status: shopifyResponse.status,
+        body: errorBody,
+      });
+      throw new Error(`Shopify API failed with status ${shopifyResponse.status}: ${errorBody}`);
     }
 
-    const shopifyData = await shopifyResponse.json();
+    const responseData = await shopifyResponse.json();
     
-    if (shopifyData.errors) {
-      console.error('Shopify GraphQL errors:', shopifyData.errors);
-      return new Response(
-        JSON.stringify({ 
-          error: 'Shopify GraphQL errors',
-          details: shopifyData.errors
-        }),
-        { 
-          status: 400, 
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-        }
-      );
+    // Check for errors within the GraphQL response body itself
+    if (responseData.errors) {
+        console.error('Shopify GraphQL errors:', responseData.errors);
+        throw new Error(`GraphQL error: ${JSON.stringify(responseData.errors)}`);
     }
 
-    console.log('Successfully fetched data from Shopify');
-
-    return new Response(
-      JSON.stringify(shopifyData),
-      { 
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-      }
-    );
+    // 6. --- Return Successful Data to Client ---
+    return new Response(JSON.stringify(responseData.data), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      status: 200,
+    });
 
   } catch (error) {
-    console.error('Function error:', error);
-    return new Response(
-      JSON.stringify({ 
-        error: 'Internal server error',
-        details: error.message
-      }),
-      { 
-        status: 500, 
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-      }
-    );
+    // Generic catch-all for any other errors.
+    console.error('An unexpected error occurred:', error.message);
+    return new Response(JSON.stringify({ error: error.message }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      status: 500,
+    });
   }
 });

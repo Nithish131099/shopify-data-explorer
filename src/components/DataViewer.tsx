@@ -120,8 +120,7 @@ export default function DataViewer({ store }: DataViewerProps) {
         ];
       case 'customers':
         return [
-          { key: 'displayName', label: 'Name' },
-          { key: 'email', label: 'Email' },
+          { key: 'id', label: 'Customer ID' },
           { key: 'numberOfOrders', label: 'Orders' },
           { key: 'amountSpent', label: 'Total Spent' }
         ];
@@ -139,9 +138,7 @@ export default function DataViewer({ store }: DataViewerProps) {
             totalPrice: node.totalPriceSet?.shopMoney 
               ? `${node.totalPriceSet.shopMoney.currencyCode} ${parseFloat(node.totalPriceSet.shopMoney.amount).toFixed(2)}`
               : 'N/A',
-            customerName: node.customer 
-              ? `${node.customer.firstName || ''} ${node.customer.lastName || ''}`.trim() || node.customer.email || 'Guest'
-              : 'Guest',
+            customerName: 'Customer', // Customer details restricted by Shopify API permissions
             processedAt: node.processedAt ? new Date(node.processedAt).toLocaleDateString() : 'N/A'
           };
         case 'products':
